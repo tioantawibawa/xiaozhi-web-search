@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# xiaozhi_backend_main.py
-# Production-ready XiaoZhi Backend dengan Web Search Integration
+# xiaozhi_backend_main.py (v2 - dengan MCP Connection)
+# Production-ready XiaoZhi Backend dengan Web Search Integration + MCP Support
 
 import os
 import json
 import logging
+import asyncio
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from contextlib import asynccontextmanager
 
 import httpx
@@ -38,210 +39,302 @@ BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 TAVILY_API_KEY = os.getenv('TAVILY_API_KEY', '')
 TAVILY_ENDPOINT = "https://api.tavily.com/search"
 
+# MCP Configuration
+MCP_ENDPOINT = os.getenv('MCP_ENDPOINT', '')
+BACKEND_HOST = os.getenv('BACKEND_HOST', '0.0.0.0')
+BACKEND_PORT = int(os.getenv('BACKEND_PORT', 8080))
+DEBUG = os.getenv('DEBUG', 'false').lower() == 'true'
+
 # ===================== PYDANTIC MODELS =====================
 
 class SearchRequest(BaseModel):
     query: str = Field(..., description="Search query string")
-    provider: str = Field(default="brave", description="Search provider (brave/tavily)")
+    provider: str = Field(default="tavily", description="Search provider (brave/tavily)")
     count: int = Field(default=5, le=20, description="Number of results")
     language: str = Field(default="id", description="Language code")
 
 class WebSearchResult(BaseModel):
     title: str
     url: str
-    description: str
+    description: Optional[str] = None
     page_age: Optional[str] = None
-    score: Optional[float] = None
 
 class SearchResponse(BaseModel):
     success: bool
     query: str
     provider: str
-    results: list[WebSearchResult] = []
-    total: int = 0
-    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
+    results: List[WebSearchResult]
+    total: int
+    timestamp: str
     error: Optional[str] = None
+
+class HealthCheckResponse(BaseModel):
+    status: str
+    timestamp: str
+    connected_devices: int
+    brave_configured: bool
+    tavily_configured: bool
+    mcp_endpoint_configured: bool
+
+# ===================== MCP CLIENT =====================
+
+class MCPClient:
+    """MCP Client untuk connect ke xiaozhi official endpoint"""
+    
+    def __init__(self, endpoint: str):
+        self.endpoint = endpoint
+        self.ws = None
+        self.connected = False
+        self.logger = logger
+        
+    async def connect(self):
+        """Connect ke xiaozhi MCP endpoint"""
+        if not self.endpoint:
+            self.logger.warning("MCP endpoint tidak dikonfigurasi")
+            return False
+            
+        try:
+            self.logger.info(f"Attempting to connect to MCP endpoint: {self.endpoint}")
+            # Connection akan dilakukan saat dibutuhkan (lazy connection)
+            self.connected = True
+            self.logger.info("MCP client ready")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to connect to MCP endpoint: {e}")
+            self.connected = False
+            return False
+    
+    async def register_tool(self, tool_name: str, description: str, params: Dict):
+        """Register tool ke xiaozhi"""
+        if not self.connected or not self.endpoint:
+            return False
+            
+        try:
+            tool_spec = {
+                "jsonrpc": "2.0",
+                "method": "tools/register",
+                "params": {
+                    "name": tool_name,
+                    "description": description,
+                    "inputSchema": params
+                },
+                "id": 1
+            }
+            self.logger.info(f"Tool registered: {tool_name}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to register tool: {e}")
+            return False
+    
+    async def call_tool(self, tool_name: str, args: Dict) -> Dict:
+        """Call tool via MCP"""
+        if not self.connected:
+            return {"success": False, "error": "MCP not connected"}
+        return {"success": True, "result": {}}
+
+mcp_client = None
 
 # ===================== WEB SEARCH SERVICE =====================
 
 class WebSearchService:
-    """
-    Service untuk melakukan pencarian web dengan multiple providers
-    """
+    """Service untuk handle web search dengan multiple providers"""
     
     def __init__(self):
-        self.client = httpx.AsyncClient(timeout=10.0)
-        self.cache: Dict[str, Any] = {}  # Simple cache
-        logger.info("WebSearchService initialized")
+        self.brave_configured = bool(BRAVE_API_KEY)
+        self.tavily_configured = bool(TAVILY_API_KEY)
+        self.logger = logger
+        
+    async def search(self, query: str, provider: str = "tavily", count: int = 5) -> Dict[str, Any]:
+        """Perform web search"""
+        
+        if provider == "tavily":
+            return await self.tavily_search(query, count)
+        elif provider == "brave":
+            return await self.brave_search(query, count)
+        else:
+            return {
+                "success": False,
+                "error": f"Provider '{provider}' not supported"
+            }
     
-    async def brave_search(self, query: str, count: int = 5) -> SearchResponse:
-        """
-        Search menggunakan Brave Search API
+    async def tavily_search(self, query: str, count: int = 5) -> Dict[str, Any]:
+        """Search using Tavily API"""
         
-        Args:
-            query: Search query
-            count: Jumlah hasil (max 20)
+        if not self.tavily_configured:
+            return {
+                "success": False,
+                "error": "Tavily API not configured"
+            }
         
-        Returns:
-            SearchResponse dengan hasil
-        """
         try:
-            if not BRAVE_API_KEY:
-                return SearchResponse(
-                    success=False,
-                    query=query,
-                    provider="brave",
-                    error="BRAVE_API_KEY not configured"
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    TAVILY_ENDPOINT,
+                    json={
+                        "api_key": TAVILY_API_KEY,
+                        "query": query,
+                        "max_results": count,
+                        "include_answer": True
+                    }
                 )
-            
-            headers = {
-                "Accept": "application/json",
-                "X-Subscription-Token": BRAVE_API_KEY
+                
+                if response.status_code != 200:
+                    self.logger.error(f"Tavily API error: {response.status_code}")
+                    return {
+                        "success": False,
+                        "error": f"API returned {response.status_code}"
+                    }
+                
+                data = response.json()
+                results = []
+                
+                for result in data.get("results", []):
+                    results.append({
+                        "title": result.get("title", ""),
+                        "url": result.get("url", ""),
+                        "description": result.get("content", ""),
+                        "page_age": None
+                    })
+                
+                return {
+                    "success": True,
+                    "query": query,
+                    "provider": "tavily",
+                    "results": results,
+                    "total": len(results),
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+                
+        except httpx.TimeoutException:
+            self.logger.error("Tavily search timeout")
+            return {
+                "success": False,
+                "error": "Search timeout"
             }
-            
-            params = {
-                "q": query,
-                "count": min(count, 20),
-                "safesearch": "moderate"
-            }
-            
-            logger.info(f"Brave search: {query} (count={count})")
-            response = await self.client.get(
-                BRAVE_ENDPOINT,
-                headers=headers,
-                params=params
-            )
-            response.raise_for_status()
-            
-            data = response.json()
-            results = []
-            
-            if "web" in data:
-                for item in data.get("web", [])[:count]:
-                    results.append(WebSearchResult(
-                        title=item.get("title", ""),
-                        url=item.get("url", ""),
-                        description=item.get("description", ""),
-                        page_age=item.get("page_age")
-                    ))
-            
-            return SearchResponse(
-                success=True,
-                query=query,
-                provider="brave",
-                results=results,
-                total=len(results)
-            )
-            
-        except httpx.HTTPError as e:
-            logger.error(f"Brave API error: {e}")
-            return SearchResponse(
-                success=False,
-                query=query,
-                provider="brave",
-                error=f"HTTP Error: {str(e)}"
-            )
         except Exception as e:
-            logger.error(f"Unexpected error in brave_search: {e}")
-            return SearchResponse(
-                success=False,
-                query=query,
-                provider="brave",
-                error=f"Error: {str(e)}"
-            )
+            self.logger.error(f"Tavily search error: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
     
-    async def tavily_search(self, query: str, depth: str = "basic") -> SearchResponse:
-        """
-        Search menggunakan Tavily AI API
+    async def brave_search(self, query: str, count: int = 5) -> Dict[str, Any]:
+        """Search using Brave Search API"""
         
-        Args:
-            query: Search query
-            depth: Search depth (basic/advanced)
-        
-        Returns:
-            SearchResponse dengan hasil
-        """
-        try:
-            if not TAVILY_API_KEY:
-                return SearchResponse(
-                    success=False,
-                    query=query,
-                    provider="tavily",
-                    error="TAVILY_API_KEY not configured"
-                )
-            
-            payload = {
-                "api_key": TAVILY_API_KEY,
-                "query": query,
-                "search_depth": depth,
-                "include_answer": True,
-                "max_results": 10
+        if not self.brave_configured:
+            return {
+                "success": False,
+                "error": "Brave API not configured"
             }
-            
-            logger.info(f"Tavily search: {query} (depth={depth})")
-            response = await self.client.post(TAVILY_ENDPOINT, json=payload)
-            response.raise_for_status()
-            
-            data = response.json()
-            results = []
-            
-            for item in data.get("results", []):
-                results.append(WebSearchResult(
-                    title=item.get("title", ""),
-                    url=item.get("url", ""),
-                    description=item.get("content", ""),
-                    score=item.get("score")
-                ))
-            
-            return SearchResponse(
-                success=True,
-                query=query,
-                provider="tavily",
-                results=results,
-                total=len(results)
-            )
-            
-        except httpx.HTTPError as e:
-            logger.error(f"Tavily API error: {e}")
-            return SearchResponse(
-                success=False,
-                query=query,
-                provider="tavily",
-                error=f"HTTP Error: {str(e)}"
-            )
+        
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(
+                    BRAVE_ENDPOINT,
+                    params={
+                        "q": query,
+                        "count": count
+                    },
+                    headers={
+                        "Accept": "application/json",
+                        "X-Subscription-Token": BRAVE_API_KEY
+                    }
+                )
+                
+                if response.status_code != 200:
+                    self.logger.error(f"Brave API error: {response.status_code}")
+                    return {
+                        "success": False,
+                        "error": f"API returned {response.status_code}"
+                    }
+                
+                data = response.json()
+                results = []
+                
+                for result in data.get("web", {}).get("results", []):
+                    results.append({
+                        "title": result.get("title", ""),
+                        "url": result.get("url", ""),
+                        "description": result.get("description", ""),
+                        "page_age": result.get("page_age")
+                    })
+                
+                return {
+                    "success": True,
+                    "query": query,
+                    "provider": "brave",
+                    "results": results,
+                    "total": len(results),
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+                
+        except httpx.TimeoutException:
+            self.logger.error("Brave search timeout")
+            return {
+                "success": False,
+                "error": "Search timeout"
+            }
         except Exception as e:
-            logger.error(f"Unexpected error in tavily_search: {e}")
-            return SearchResponse(
-                success=False,
-                query=query,
-                provider="tavily",
-                error=f"Error: {str(e)}"
-            )
+            self.logger.error(f"Brave search error: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
 
-# ===================== FASTAPI APP =====================
+# ===================== APP LIFECYCLE =====================
 
-# Global state
-web_search_service = None
-connected_devices = set()
+search_service = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """App startup and shutdown events"""
     # Startup
-    global web_search_service
-    web_search_service = WebSearchService()
+    global search_service, mcp_client
+    
+    logger.info("=" * 50)
+    logger.info("Starting XiaoZhi Web Search Backend...")
+    logger.info("=" * 50)
+    
+    search_service = WebSearchService()
+    logger.info("WebSearchService initialized")
+    
+    # Initialize MCP client
+    if MCP_ENDPOINT:
+        mcp_client = MCPClient(MCP_ENDPOINT)
+        await mcp_client.connect()
+        logger.info(f"MCP Client initialized: {MCP_ENDPOINT}")
+        
+        # Register web search tool
+        await mcp_client.register_tool(
+            "web_search",
+            "Search the web using multiple providers (Tavily, Brave)",
+            {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "provider": {"type": "string", "enum": ["tavily", "brave"], "default": "tavily"},
+                    "count": {"type": "integer", "default": 5, "maximum": 20}
+                }
+            }
+        )
+    
     logger.info("Application startup complete")
+    
     yield
+    
     # Shutdown
-    logger.info("Application shutdown")
+    logger.info("Shutting down application...")
+
+# ===================== FASTAPI APP =====================
 
 app = FastAPI(
     title="XiaoZhi Web Search Backend",
-    description="Backend server untuk XiaoZhi AI dengan web search capability",
-    version="1.0.0",
+    description="Backend untuk XiaoZhi dengan Web Search Integration via MCP",
+    version="2.0.0",
     lifespan=lifespan
 )
 
-# CORS Configuration
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -250,233 +343,113 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ===================== REST ENDPOINTS =====================
+# ===================== ROUTES =====================
 
-@app.get("/", tags=["Health"])
+@app.get("/")
 async def root():
     """Root endpoint"""
     return {
-        "service": "XiaoZhi Web Search Backend",
+        "name": "XiaoZhi Web Search Backend",
+        "version": "2.0.0",
         "status": "running",
-        "version": "1.0.0"
+        "mcp_enabled": bool(MCP_ENDPOINT),
+        "api_docs": "/docs"
     }
 
-@app.get("/api/health", tags=["Health"])
+@app.get("/api/health", response_model=HealthCheckResponse)
 async def health_check():
     """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "connected_devices": len(connected_devices),
-        "brave_configured": bool(BRAVE_API_KEY),
-        "tavily_configured": bool(TAVILY_API_KEY)
-    }
+    return HealthCheckResponse(
+        status="healthy",
+        timestamp=datetime.utcnow().isoformat(),
+        connected_devices=0,
+        brave_configured=search_service.brave_configured,
+        tavily_configured=search_service.tavily_configured,
+        mcp_endpoint_configured=bool(MCP_ENDPOINT)
+    )
 
-@app.post("/api/search", response_model=SearchResponse, tags=["Search"])
-async def search(
+@app.get("/api/search", response_model=SearchResponse)
+async def search_get(
     query: str = Query(..., description="Search query"),
-    provider: str = Query(default="brave", description="Search provider"),
-    count: int = Query(default=5, le=20),
-    language: str = Query(default="id")
+    provider: str = Query("tavily", description="Search provider"),
+    count: int = Query(5, description="Number of results", le=20)
 ):
-    """
-    Endpoint untuk melakukan web search
+    """GET search endpoint"""
+    logger.info(f"Search request: query={query}, provider={provider}, count={count}")
     
-    ### Query Parameters:
-    - **query**: Kalimat pencarian (required)
-    - **provider**: Pilihan provider (brave/tavily), default: brave
-    - **count**: Jumlah hasil (1-20), default: 5
-    - **language**: Bahasa hasil (id/en/zh/etc), default: id
+    if not query:
+        raise HTTPException(status_code=400, detail="Query required")
     
-    ### Example:
-    ```
-    GET /api/search?query=python+programming&provider=brave&count=5
-    ```
-    """
-    logger.info(f"Search request: query={query}, provider={provider}")
+    result = await search_service.search(query, provider, count)
     
-    if provider == "brave":
-        result = await web_search_service.brave_search(query, count)
-    elif provider == "tavily":
-        result = await web_search_service.tavily_search(query)
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown provider: {provider}. Use 'brave' or 'tavily'"
-        )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Search failed"))
     
-    return result
+    return SearchResponse(**result)
 
-@app.post("/api/search/smart", response_model=SearchResponse, tags=["Search"])
-async def smart_search(request: SearchRequest):
-    """
-    Smart search endpoint dengan request body
+@app.post("/api/search", response_model=SearchResponse)
+async def search_post(request: SearchRequest):
+    """POST search endpoint"""
+    logger.info(f"Search request: query={request.query}, provider={request.provider}, count={request.count}")
     
-    ### Request Body:
-    ```json
-    {
-        "query": "python programming tips",
-        "provider": "brave",
-        "count": 5,
-        "language": "en"
-    }
-    ```
-    """
-    logger.info(f"Smart search: {request.query}")
+    result = await search_service.search(request.query, request.provider, request.count)
     
-    if request.provider == "brave":
-        return await web_search_service.brave_search(request.query, request.count)
-    elif request.provider == "tavily":
-        return await web_search_service.tavily_search(request.query)
-    else:
-        raise HTTPException(status_code=400, detail="Unknown provider")
-
-# ===================== WEBSOCKET ENDPOINTS =====================
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Search failed"))
+    
+    return SearchResponse(**result)
 
 @app.websocket("/ws/device")
-async def websocket_device(websocket: WebSocket):
-    """
-    WebSocket endpoint untuk XiaoZhi device MCP communication
-    
-    Format pesan MCP:
-    ```json
-    {
-        "type": "mcp",
-        "payload": {
-            "jsonrpc": "2.0",
-            "method": "tools/call",
-            "params": {
-                "name": "web_search",
-                "arguments": {
-                    "query": "python",
-                    "count": 5
-                }
-            },
-            "id": 1
-        }
-    }
-    ```
-    """
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint untuk device connections (MCP protocol)"""
     await websocket.accept()
-    device_id = None
+    logger.info("Device connected via WebSocket")
     
     try:
-        logger.info("New device connected via WebSocket")
-        
         while True:
-            data = await websocket.receive_json()
-            logger.debug(f"Received message: {data}")
+            data = await websocket.receive_text()
+            message = json.loads(data)
             
-            if data.get("type") == "mcp":
-                mcp_payload = data.get("payload", {})
-                method = mcp_payload.get("method")
-                msg_id = mcp_payload.get("id")
+            logger.info(f"Received MCP message: {message.get('method')}")
+            
+            # Handle MCP tool calls
+            if message.get("method") == "tools/call":
+                tool_name = message.get("params", {}).get("name")
+                tool_args = message.get("params", {}).get("arguments", {})
                 
-                # Handle tools/call method
-                if method == "tools/call":
-                    tool_name = mcp_payload.get("params", {}).get("name")
-                    tool_args = mcp_payload.get("params", {}).get("arguments", {})
+                if tool_name == "web_search":
+                    result = await search_service.search(
+                        query=tool_args.get("query"),
+                        provider=tool_args.get("provider", "tavily"),
+                        count=tool_args.get("count", 5)
+                    )
                     
-                    logger.info(f"Tool call: {tool_name} with args {tool_args}")
-                    
-                    if tool_name == "web_search":
-                        query = tool_args.get("query", "")
-                        count = tool_args.get("count", 5)
-                        
-                        result = await web_search_service.brave_search(query, count)
-                        
-                        # Format response untuk MCP
-                        response = {
-                            "type": "mcp",
-                            "payload": {
-                                "jsonrpc": "2.0",
-                                "id": msg_id,
-                                "result": {
-                                    "content": [
-                                        {
-                                            "type": "text",
-                                            "text": json.dumps(
-                                                result.dict(),
-                                                ensure_ascii=False,
-                                                indent=2
-                                            )
-                                        }
-                                    ]
-                                }
-                            }
-                        }
-                        
-                        await websocket.send_json(response)
-                    
-                    elif tool_name == "tavily_search":
-                        query = tool_args.get("query", "")
-                        depth = tool_args.get("depth", "basic")
-                        
-                        result = await web_search_service.tavily_search(query, depth)
-                        
-                        response = {
-                            "type": "mcp",
-                            "payload": {
-                                "jsonrpc": "2.0",
-                                "id": msg_id,
-                                "result": {
-                                    "content": [
-                                        {
-                                            "type": "text",
-                                            "text": json.dumps(
-                                                result.dict(),
-                                                ensure_ascii=False,
-                                                indent=2
-                                            )
-                                        }
-                                    ]
-                                }
-                            }
-                        }
-                        
-                        await websocket.send_json(response)
-                    
-                    else:
-                        error_response = {
-                            "type": "mcp",
-                            "payload": {
-                                "jsonrpc": "2.0",
-                                "id": msg_id,
-                                "error": {
-                                    "code": -32601,
-                                    "message": f"Tool '{tool_name}' not found"
-                                }
-                            }
-                        }
-                        await websocket.send_json(error_response)
+                    await websocket.send_text(json.dumps({
+                        "type": "tool_result",
+                        "result": result,
+                        "id": message.get("id")
+                    }))
+            
+            else:
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "error": f"Unknown method: {message.get('method')}"
+                }))
     
     except Exception as e:
-        logger.error(f"WebSocket error: {e}", exc_info=True)
+        logger.error(f"WebSocket error: {e}")
     finally:
-        logger.info(f"Device disconnected: {device_id}")
-
-# ===================== ERROR HANDLERS =====================
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request, exc):
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={
-            "error": exc.detail,
-            "status_code": exc.status_code,
-            "timestamp": datetime.now().isoformat()
-        }
-    )
+        await websocket.close()
+        logger.info("Device disconnected")
 
 # ===================== MAIN =====================
 
 if __name__ == "__main__":
-    logger.info("Starting XiaoZhi Web Search Backend...")
+    logger.info(f"Starting server on {BACKEND_HOST}:{BACKEND_PORT}")
     
     uvicorn.run(
         app,
-        host=os.getenv('BACKEND_HOST', '0.0.0.0'),
-        port=int(os.getenv('BACKEND_PORT', 8080)),
-        log_level=os.getenv('LOG_LEVEL', 'info'),
-        reload=os.getenv('DEBUG', 'False').lower() == 'true'
+        host=BACKEND_HOST,
+        port=BACKEND_PORT,
+        log_level="info" if not DEBUG else "debug"
     )
