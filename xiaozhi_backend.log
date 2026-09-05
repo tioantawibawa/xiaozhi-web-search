@@ -1,0 +1,22 @@
+2026-09-05 22:14:26,139 - __main__ - INFO - Starting XiaoZhi Web Search Backend...
+2026-09-05 22:14:26,740 - __main__ - INFO - WebSearchService initialized
+2026-09-05 22:14:26,740 - __main__ - INFO - Application startup complete
+2026-09-05 22:16:18,226 - __main__ - INFO - Application shutdown
+2026-09-05 22:18:21,472 - __main__ - INFO - Starting XiaoZhi Web Search Backend...
+2026-09-05 22:18:21,970 - __main__ - INFO - WebSearchService initialized
+2026-09-05 22:18:21,970 - __main__ - INFO - Application startup complete
+2026-09-05 22:33:47,861 - __main__ - INFO - Application shutdown
+2026-09-05 22:33:51,892 - __main__ - INFO - Starting XiaoZhi Web Search Backend...
+2026-09-05 22:33:52,338 - __main__ - INFO - WebSearchService initialized
+2026-09-05 22:33:52,339 - __main__ - INFO - Application startup complete
+2026-09-05 22:35:44,824 - __main__ - INFO - Search request: query=python, provider=tavily
+2026-09-05 22:36:26,569 - __main__ - INFO - Search request: query=python, provider=tavily
+2026-09-05 22:48:59,556 - __main__ - INFO - Application shutdown
+2026-09-05 22:49:02,626 - __main__ - INFO - Starting XiaoZhi Web Search Backend...
+2026-09-05 22:49:03,047 - __main__ - INFO - WebSearchService initialized
+2026-09-05 22:49:03,047 - __main__ - INFO - Application startup complete
+2026-09-05 22:50:01,933 - __main__ - INFO - Application shutdown
+2026-09-05 22:50:21,613 - __main__ - INFO - Starting XiaoZhi Web Search Backend...
+2026-09-05 22:50:22,019 - __main__ - INFO - WebSearchService initialized
+2026-09-05 22:50:22,019 - __main__ - INFO - Application startup complete
+2026-09-05 22:52:59,524 - __main__ - INFO - Application shutdown
