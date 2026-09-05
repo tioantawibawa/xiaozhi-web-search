@@ -1,0 +1,15 @@
+# Exclude documentation files
+NEWBIE_STEP_BY_STEP.md
+COMMANDS_REFERENCE.md
+QUICK_START.md
+TROUBLESHOOTING_FLOWCHART.md
+README_NEWBIE.md
+xiaozhi_web_search_integration.md
+
+# Exclude other non-essential files
+venv/
+__pycache__/
+*.pyc
+.env.example
+.DS_Store
+*.log
